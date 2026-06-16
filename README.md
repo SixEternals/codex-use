@@ -47,5 +47,5 @@ codex-use               # 不带参数，列出所有可用配置
 
 ## 从服务器加密版迁移
 
-服务器版（`/home/zwf/setup_ai_vault.sh`）有 GPG 加密 + 密码保护，适用共享服务器。
+服务器版（`/home/to/your/path/setup_ai_vault.sh`）有 GPG 加密 + 密码保护，适用共享服务器。
 便携版去掉了所有加密逻辑，适用个人电脑。
