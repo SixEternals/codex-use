@@ -1,0 +1,142 @@
+#!/bin/bash
+# =============================================================================
+# codex-use — 密码解锁 + 切换中转站（安全版 v2）
+# 用法: codex-use <profile>
+#
+# 密钥只通过环境变量 OPENAI_API_KEY 传递，绝不修改 ~/.codex/auth.json。
+# 多人同时使用同一账户互不干扰，异常退出也不会泄露密钥。
+# =============================================================================
+set -e
+
+VAULT_FILE="$HOME/.ai_vault.gpg"
+POOL_DIR="$HOME/.codex-pool"
+CODX_DIR="$HOME/.codex"
+CODX_CONFIG="$CODX_DIR/config.toml"
+
+PROFILE="${1}"
+
+if [ -z "$PROFILE" ]; then
+    echo "用法: codex-use <profile>"
+    echo "可用配置:"
+    ls -1 "$POOL_DIR/" 2>/dev/null || echo "  (无)"
+    exit 1
+fi
+
+PROFILE_DIR="$POOL_DIR/$PROFILE"
+
+if [ ! -d "$PROFILE_DIR" ]; then
+    echo "❌ 配置 [$PROFILE] 不存在"
+    echo "可用: $(ls -1 "$POOL_DIR/" 2>/dev/null | tr '\n' ' ')"
+    exit 1
+fi
+
+if ! command -v gpg >/dev/null 2>&1; then
+    echo "❌ 未安装 gpg"
+    exit 1
+fi
+
+# --- 清理历史泄露的 bak 文件 ---
+BAK_COUNT=$(ls "$CODX_DIR"/*.bak.* 2>/dev/null | wc -l)
+if [ "$BAK_COUNT" -gt 0 ]; then
+    echo "🧹 清理 $BAK_COUNT 个历史泄露备份..."
+    rm -f "$CODX_DIR"/*.bak.* 2>/dev/null || true
+fi
+
+# --- 清理残留悬空链接 ---
+if [ -L "$CODX_DIR/auth.json" ] && [ ! -f "$CODX_DIR/auth.json" ]; then
+    echo "🧹 清理残留悬空链接..."
+    rm -f "$CODX_DIR/auth.json"
+fi
+
+# --- 输入密码 ---
+echo -n "🔐 保险箱密码: "
+read -r -s PASSPHRASE
+echo ""
+
+if [ -z "$PASSPHRASE" ]; then
+    echo "❌ 密码不能为空"
+    exit 1
+fi
+
+# ============ 备份 config.toml ============
+BACKUP_CONFIG=""
+if [ -f "$CODX_CONFIG" ]; then
+    BACKUP_CONFIG="/dev/shm/codex_config_bak_$$.toml"
+    cp "$CODX_CONFIG" "$BACKUP_CONFIG"
+fi
+
+# ============ cleanup: exit 时恢复 ============
+cleanup() {
+    echo ""
+    echo "🧹 正在恢复..."
+
+    # 恢复 config.toml
+    if [ -n "$BACKUP_CONFIG" ] && [ -f "$BACKUP_CONFIG" ]; then
+        cp "$BACKUP_CONFIG" "$CODX_CONFIG"
+        rm -f "$BACKUP_CONFIG"
+        echo "   🔄 config.toml 已恢复"
+    else
+        rm -f "$CODX_CONFIG"
+    fi
+
+    # 清除内存盘中的所有临时文件
+    rm -f /dev/shm/codex_*_"$$" 2>/dev/null || true
+
+    echo "   🧽 内存密钥已清除"
+}
+trap cleanup EXIT
+
+# ============ config.toml (非敏感，直接写盘) ============
+if [ -f "$PROFILE_DIR/config.toml" ]; then
+    cp "$PROFILE_DIR/config.toml" "$CODX_CONFIG"
+elif [ -f "$PROFILE_DIR/config.toml.gpg" ]; then
+    if ! echo "$PASSPHRASE" | gpg --batch --passphrase-fd 0 --quiet \
+         --decrypt "$PROFILE_DIR/config.toml.gpg" > "$CODX_CONFIG" 2>/dev/null; then
+        echo "❌ config.toml.gpg 解密失败"
+        exit 1
+    fi
+fi
+chmod 600 "$CODX_CONFIG"
+
+# ============ 密钥：解密到 /dev/shm，通过环境变量注入 ============
+if [ -f "$PROFILE_DIR/auth.json.gpg" ]; then
+    SHM_AUTH="/dev/shm/codex_auth_$$.json"
+    if ! echo "$PASSPHRASE" | gpg --batch --passphrase-fd 0 --quiet \
+         --decrypt "$PROFILE_DIR/auth.json.gpg" > "$SHM_AUTH" 2>/dev/null; then
+        echo "❌ auth.json.gpg 解密失败"
+        exit 1
+    fi
+    chmod 600 "$SHM_AUTH"
+
+    # 从解密后的 JSON 提取密钥，注入环境变量
+    if command -v python3 >/dev/null 2>&1; then
+        API_KEY=$(python3 -c "import json; d=json.load(open('$SHM_AUTH')); print(d.get('OPENAI_API_KEY','') or d.get('api_key',''))" 2>/dev/null)
+        [ -n "$API_KEY" ] && export OPENAI_API_KEY="$API_KEY"
+    fi
+elif [ -f "$VAULT_FILE" ]; then
+    VAULT_TMP="/dev/shm/vault_env_$(id -u)_$$"
+    if echo "$PASSPHRASE" | gpg --batch --passphrase-fd 0 --quiet \
+         --decrypt "$VAULT_FILE" > "$VAULT_TMP" 2>/dev/null; then
+        source "$VAULT_TMP"
+        shred -u "$VAULT_TMP" 2>/dev/null || rm -f "$VAULT_TMP"
+    fi
+fi
+
+unset PASSPHRASE
+
+# ============ 进入子 shell ============
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║  ✅ 已切换至 [$PROFILE]                ║"
+echo "║  密钥通过环境变量注入，不落盘          ║"
+echo "║  不影响其他会话的 codex               ║"
+echo "║  输入 exit 退出并自动恢复原配置        ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+export PS1="(codex:$PROFILE) \$PS1"
+export HTTPS_PROXY="http://127.0.0.1:7897"
+export https_proxy="http://127.0.0.1:7897"
+bash
+echo ""
+echo "👋 已退出，原配置已恢复"
