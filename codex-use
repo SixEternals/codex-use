@@ -48,6 +48,13 @@ if [ -L "$CODX_DIR/auth.json" ] && [ ! -f "$CODX_DIR/auth.json" ]; then
     rm -f "$CODX_DIR/auth.json"
 fi
 
+# --- 临时移走旧的 auth.json，强制 Codex 走环境变量 ---
+AUTH_BAK=""
+if [ -f "$CODX_DIR/auth.json" ]; then
+    AUTH_BAK="/dev/shm/codex_auth_bak_$$.json"
+    mv "$CODX_DIR/auth.json" "$AUTH_BAK"
+fi
+
 # --- 输入密码 ---
 echo -n "🔐 保险箱密码: "
 read -r -s PASSPHRASE
@@ -77,6 +84,12 @@ cleanup() {
         echo "   🔄 config.toml 已恢复"
     else
         rm -f "$CODX_CONFIG"
+    fi
+
+    # 恢复旧 auth.json（如果之前被移走）
+    if [ -n "$AUTH_BAK" ] && [ -f "$AUTH_BAK" ]; then
+        mv "$AUTH_BAK" "$CODX_DIR/auth.json"
+        echo "   🔄 auth.json 已恢复"
     fi
 
     # 清除内存盘中的所有临时文件
